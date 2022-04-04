@@ -43,6 +43,8 @@ void connect_to_wifi(const char *ssid, const char *password) {
 }
 
 void setup() {
+    // https://savjee.be/2020/01/multitasking-esp32-arduino-freertos/
+
     if (BLINK) pinMode(LED_BUILTIN, OUTPUT);
     if (MONITOR) Serial.begin(115200);
 
