@@ -1,0 +1,11 @@
+Add a file to this directory:
+
+config.h:
+
+```c++
+const char *ssid = ""; // your network SSID
+const char *password = ""; // your network password
+
+const char *target_address = ""; // your dispatcher module IP
+const int udp_port = 0; // the UDP port on which your dispatcher module will be listening
+```
