@@ -3,9 +3,13 @@ Add a file to this directory:
 config.h:
 
 ```c++
-const char *ssid = ""; // your network SSID
-const char *password = ""; // your network password
+// your network SSID
+#define WIFI_SSID ""
+// your network password
+#define WIFI_PASSWORD ""
 
-const char *target_address = ""; // your dispatcher module IP
-const int udp_port = 0; // the UDP port on which your dispatcher module will be listening
+// your dispatcher module IP
+#define TARGET_ADDRESS ""
+// the UDP port on which your dispatcher module will be listening
+#define UDP_PORT 0
 ```
