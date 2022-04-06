@@ -118,7 +118,7 @@ static void event_handler(void* arg, esp_event_base_t event_base,
     }
 }
 
-static void initialise_wifi() {
+static void wifi_init() {
     s_wifi_event_group = xEventGroupCreate();
 
     ESP_ERROR_CHECK(esp_netif_init());
@@ -147,7 +147,7 @@ static void initialise_wifi() {
     connected = true;
 }
 
-static void setup_udp() {
+static void udp_init() {
     dest_addr.sin_addr.s_addr = inet_addr(TARGET_ADDRESS);
     dest_addr.sin_family = AF_INET;
     dest_addr.sin_port = htons(UDP_PORT);
@@ -156,6 +156,15 @@ static void setup_udp() {
     // to actually send:
     /* sendto(sock, payload, strlen(payload), 0, (struct sockaddr *)&dest_addr,
            sizeof(dest_addr)); */
+}
+
+static void udp_sendbytes(char* payload, int len) {
+    sendto(sock, payload, len, 0, (struct sockaddr*)&dest_addr,
+           sizeof(dest_addr));
+}
+
+static void udp_sendstr(char* payload) {
+    udp_sendbytes(payload, strlen(payload));
 }
 
 void loop() {
@@ -168,8 +177,7 @@ void loop() {
             sprintf(payload, "ms since boot: %lli\n", cur_millis);
 
             printf("%s", payload);
-            sendto(sock, payload, strlen(payload), 0,
-                   (struct sockaddr*)&dest_addr, sizeof(dest_addr));
+            udp_sendstr(payload);
         }
 
         if (BLINK) {
@@ -216,8 +224,8 @@ void app_main(void) {
     }
 
     // wifi
-    initialise_wifi();
-    setup_udp();
+    wifi_init();
+    udp_init();
 
     xTaskCreate(loop_task, "loop", 10240, NULL, 1, NULL);
 
