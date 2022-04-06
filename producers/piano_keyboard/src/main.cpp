@@ -52,52 +52,12 @@ int sock;
 #define BLINK true
 #define MONITOR false
 
+#define UDP_BUFFER_SIZE 1024
+
 unsigned long last_blink = 0;
 bool on = false;
 
 // /configurations -------------------
-
-/* static void on_usb_detect(uint8_t usbNum, void *dev) {
-    sDevDesc *device = (sDevDesc *)dev;
-
-    udp.beginPacket(target_address, udp_port);
-
-    udp.printf("New device detected on USB#%d\n", usbNum);
-    udp.printf("desc.bcdUSB             = 0x%04x\n", device->bcdUSB);
-    udp.printf("desc.bDeviceClass       = 0x%02x\n", device->bDeviceClass);
-    udp.printf("desc.bDeviceSubClass    = 0x%02x\n", device->bDeviceSubClass);
-    udp.printf("desc.bDeviceProtocol    = 0x%02x\n", device->bDeviceProtocol);
-    udp.printf("desc.bMaxPacketSize0    = 0x%02x\n", device->bMaxPacketSize0);
-    udp.printf("desc.idVendor           = 0x%04x\n", device->idVendor);
-    udp.printf("desc.idProduct          = 0x%04x\n", device->idProduct);
-    udp.printf("desc.bcdDevice          = 0x%04x\n", device->bcdDevice);
-    udp.printf("desc.iManufacturer      = 0x%02x\n", device->iManufacturer);
-    udp.printf("desc.iProduct           = 0x%02x\n", device->iProduct);
-    udp.printf("desc.iSerialNumber      = 0x%02x\n", device->iSerialNumber);
-    udp.printf("desc.bNumConfigurations = 0x%02x\n",
-               device->bNumConfigurations);
-
-    udp.endPacket();
-    // if( device->iProduct == mySupportedIdProduct && device->iManufacturer ==
-    // mySupportedManufacturer ) {
-    //   myListenUSBPort = usbNum;
-    // }
-}
-
-static void on_usb_data(uint8_t usbNum, uint8_t byte_depth, uint8_t *data,
-                        uint8_t data_len) {
-    // if( myListenUSBPort != usbNum ) return;
-
-    udp.beginPacket(target_address, udp_port);
-
-    udp.printf("in: ");
-    for (int k = 0; k < data_len; k++) {
-        udp.printf("0x%02x ", data[k]);
-    }
-    udp.printf("\n");
-
-    udp.endPacket();
-} */
 
 static void event_handler(void* arg, esp_event_base_t event_base,
                           int32_t event_id, void* event_data) {
@@ -152,10 +112,6 @@ static void udp_init() {
     dest_addr.sin_family = AF_INET;
     dest_addr.sin_port = htons(UDP_PORT);
     sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_IP);
-
-    // to actually send:
-    /* sendto(sock, payload, strlen(payload), 0, (struct sockaddr *)&dest_addr,
-           sizeof(dest_addr)); */
 }
 
 static void udp_sendbytes(char* payload, int len) {
@@ -167,17 +123,58 @@ static void udp_sendstr(char* payload) {
     udp_sendbytes(payload, strlen(payload));
 }
 
+static void udp_sendf(const char* fmt, ...) {
+    char payload[UDP_BUFFER_SIZE];
+
+    va_list args;
+    va_start(args, fmt);
+    int len = vsprintf(payload, fmt, args);
+    va_end(args);
+
+    udp_sendbytes(payload, len);
+}
+
+static void on_usb_detect(uint8_t usbNum, void* dev) {
+    sDevDesc* device = (sDevDesc*)dev;
+
+    udp_sendf("New device detected on USB#%d\n", usbNum);
+    udp_sendf("desc.bcdUSB             = 0x%04x\n", device->bcdUSB);
+    udp_sendf("desc.bDeviceClass       = 0x%02x\n", device->bDeviceClass);
+    udp_sendf("desc.bDeviceSubClass    = 0x%02x\n", device->bDeviceSubClass);
+    udp_sendf("desc.bDeviceProtocol    = 0x%02x\n", device->bDeviceProtocol);
+    udp_sendf("desc.bMaxPacketSize0    = 0x%02x\n", device->bMaxPacketSize0);
+    udp_sendf("desc.idVendor           = 0x%04x\n", device->idVendor);
+    udp_sendf("desc.idProduct          = 0x%04x\n", device->idProduct);
+    udp_sendf("desc.bcdDevice          = 0x%04x\n", device->bcdDevice);
+    udp_sendf("desc.iManufacturer      = 0x%02x\n", device->iManufacturer);
+    udp_sendf("desc.iProduct           = 0x%02x\n", device->iProduct);
+    udp_sendf("desc.iSerialNumber      = 0x%02x\n", device->iSerialNumber);
+    udp_sendf("desc.bNumConfigurations = 0x%02x\n", device->bNumConfigurations);
+
+    // if( device->iProduct == mySupportedIdProduct && device->iManufacturer ==
+    // mySupportedManufacturer ) {
+    //   myListenUSBPort = usbNum;
+    // }
+}
+
+static void on_usb_data(uint8_t usbNum, uint8_t byte_depth, uint8_t* data,
+                        uint8_t data_len) {
+    // if( myListenUSBPort != usbNum ) return;
+
+    udp_sendf("in: ");
+    for (int k = 0; k < data_len; k++) {
+        udp_sendf("0x%02x ", data[k]);
+    }
+    udp_sendf("\n");
+}
+
 void loop() {
     int64_t cur_millis = esp_timer_get_time() / 1000;
     if (cur_millis - last_blink >= 500) {
         last_blink = cur_millis;
 
         if (connected) {
-            char payload[100];
-            sprintf(payload, "ms since boot: %lli\n", cur_millis);
-
-            printf("%s", payload);
-            udp_sendstr(payload);
+            udp_sendf("ms since boot: %lli\n", cur_millis);
         }
 
         if (BLINK) {
