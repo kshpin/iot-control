@@ -9,4 +9,4 @@ sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 sock.bind(("", UDP_PORT))
 
 while True:
-    print(sock.recv(BUFFER_SIZE))
+    print(str(sock.recv(BUFFER_SIZE)), end="")
