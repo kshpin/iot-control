@@ -4,10 +4,13 @@
 #include <string.h>
 #include <sys/param.h>
 
+#include <ESP32-USBSoftHost.hpp>
+
 #include "driver/gpio.h"
 #include "esp_event.h"
 #include "esp_log.h"
 #include "esp_netif.h"
+#include "esp_spi_flash.h"
 #include "esp_system.h"
 #include "esp_wifi.h"
 #include "freertos/FreeRTOS.h"
@@ -17,12 +20,6 @@
 #include "lwip/sockets.h"
 #include "lwip/sys.h"
 #include "nvs_flash.h"
-
-//#include <ESP32-USBSoftHost.hpp>
-
-#include "esp_spi_flash.h"
-#include "freertos/FreeRTOS.h"
-#include "freertos/task.h"
 
 #define LED_BUILTIN GPIO_NUM_1
 
@@ -163,7 +160,7 @@ static void setup_udp() {
 
 void loop() {
     int64_t cur_millis = esp_timer_get_time() / 1000;
-    if (cur_millis - last_blink > 500) {
+    if (cur_millis - last_blink >= 500) {
         last_blink = cur_millis;
 
         if (connected) {
@@ -192,7 +189,7 @@ void loop_task(void* param) {
         loop();
         fflush(stdout);
 
-        vTaskDelay(10);
+        vTaskDelay(pdMS_TO_TICKS(1));
     }
 }
 
