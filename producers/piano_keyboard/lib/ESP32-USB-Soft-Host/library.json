@@ -1,0 +1,9 @@
+{
+    "name": "ESP32-USB-Soft-Host",
+    "version": "1.0.0",
+    "repository": {
+        "type": "git",
+        "url": "https://github.com/tobozo/ESP32-USB-Soft-Host.git"
+    },
+    "headers": "src/ESP32-USBSoftHost.hpp"
+}
