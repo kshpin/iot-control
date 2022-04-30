@@ -1,0 +1,18 @@
+Add a file to this directory:
+
+config.h:
+
+```c++
+// your network SSID
+#define WIFI_SSID ""
+// your network password
+#define WIFI_PASSWORD ""
+
+// your dispatcher module IP
+#define MQTT_ADDRESS "mqtt://your.dispatcher:port"
+// the UDP port on which your dispatcher module will be listening
+#define MQTT_PORT 0
+
+// the ID of the device that this code will be uploaded to
+#define DEVICE_ID ""
+```
