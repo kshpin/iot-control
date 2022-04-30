@@ -9,7 +9,10 @@ config.h:
 #define WIFI_PASSWORD ""
 
 // your dispatcher module IP
-#define TARGET_ADDRESS ""
+#define MQTT_ADDRESS "mqtt://your.dispatcher:port"
 // the UDP port on which your dispatcher module will be listening
-#define UDP_PORT 0
+#define MQTT_PORT 0
+
+// the ID of the device that this code will be uploaded to
+#define DEVICE_ID ""
 ```
