@@ -1,16 +1,14 @@
 #include <config.h>
 #include <lwip/netdb.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/param.h>
 
-#include <ESP32-USBSoftHost.hpp>
-
 #include "driver/gpio.h"
-#include "esp_event.h"
+#include "esp_hidh.h"
 #include "esp_log.h"
 #include "esp_netif.h"
-#include "esp_spi_flash.h"
 #include "esp_system.h"
 #include "esp_wifi.h"
 #include "freertos/FreeRTOS.h"
@@ -19,18 +17,10 @@
 #include "lwip/err.h"
 #include "lwip/sockets.h"
 #include "lwip/sys.h"
+#include "mqtt_client.h"
 #include "nvs_flash.h"
 
 #define LED_BUILTIN GPIO_NUM_1
-
-#define DP_P0 16  // always enabled
-#define DM_P0 17  // always enabled
-#define DP_P1 -1  // -1 to disable
-#define DM_P1 -1  // -1 to disable
-#define DP_P2 -1  // -1 to disable
-#define DM_P2 -1  // -1 to disable
-#define DP_P3 -1  // -1 to disable
-#define DM_P3 -1  // -1 to disable
 
 bool connected = false;
 
@@ -44,27 +34,40 @@ esp_netif_t* sta_netif = NULL;
 #define MAX_RETRY 3
 static int s_retry_num = 0;
 
-struct sockaddr_in dest_addr;
-int sock;
-
-// configurations --------------------
-
-#define BLINK true
-#define MONITOR false
-
-#define UDP_BUFFER_SIZE 1024
-
 unsigned long last_blink = 0;
 bool on = false;
 
-// /configurations -------------------
+esp_mqtt_client_handle_t mqtt_client;
 
-static void event_handler(void* arg, esp_event_base_t event_base,
-                          int32_t event_id, void* event_data) {
+#define MQTT_EVENT_ID_LENGTH 128
+char mqtt_event_id[MQTT_EVENT_ID_LENGTH];
+
+#define MQTT_TOPIC_LENGTH 256
+char mqtt_topic[MQTT_TOPIC_LENGTH];
+
+#define MQTT_BODY_LENGTH 1024
+char mqtt_body[MQTT_BODY_LENGTH];
+
+unsigned long last_uptime_ping = 0;
+
+// /configurations ------------------------------------------------
+
+#define BLINK true
+
+#define BLINK_PRIORITY 1
+#define SENSOR_PRIORITY 2
+
+// 0 - at most once (unreliable)
+// 1 - at least once (requires indempotency) (DEFAULT)
+// 2 - exactly once (slow)
+#define MQTT_QOS 1
+
+// configurations -------------------------------------------------
+
+static void event_handler(void* arg, esp_event_base_t event_base, int32_t event_id, void* event_data) {
     if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_START) {
         esp_wifi_connect();
-    } else if (event_base == WIFI_EVENT &&
-               event_id == WIFI_EVENT_STA_DISCONNECTED) {
+    } else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_DISCONNECTED) {
         if (s_retry_num < MAX_RETRY) {
             esp_wifi_connect();
             s_retry_num++;
@@ -91,10 +94,10 @@ static void wifi_init() {
 
     esp_event_handler_instance_t instance_any_id;
     esp_event_handler_instance_t instance_got_ip;
-    ESP_ERROR_CHECK(esp_event_handler_instance_register(
-        WIFI_EVENT, ESP_EVENT_ANY_ID, &event_handler, NULL, &instance_any_id));
-    ESP_ERROR_CHECK(esp_event_handler_instance_register(
-        IP_EVENT, IP_EVENT_STA_GOT_IP, &event_handler, NULL, &instance_got_ip));
+    ESP_ERROR_CHECK(
+        esp_event_handler_instance_register(WIFI_EVENT, ESP_EVENT_ANY_ID, &event_handler, NULL, &instance_any_id));
+    ESP_ERROR_CHECK(
+        esp_event_handler_instance_register(IP_EVENT, IP_EVENT_STA_GOT_IP, &event_handler, NULL, &instance_got_ip));
 
     wifi_sta_config_t sta = {WIFI_SSID, WIFI_PASSWORD};
     wifi_config_t wifi_config = {};
@@ -107,92 +110,67 @@ static void wifi_init() {
     connected = true;
 }
 
-static void udp_init() {
-    dest_addr.sin_addr.s_addr = inet_addr(TARGET_ADDRESS);
-    dest_addr.sin_family = AF_INET;
-    dest_addr.sin_port = htons(UDP_PORT);
-    sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_IP);
+static void mqtt_init() {
+    esp_mqtt_client_config_t mqtt_cfg = {};
+    memset((void*)&mqtt_cfg, 0, sizeof(esp_mqtt_client_config_t));
+    mqtt_cfg.uri = MQTT_ADDRESS;
+
+    mqtt_client = esp_mqtt_client_init(&mqtt_cfg);
+    esp_mqtt_client_start(mqtt_client);
 }
 
-static void udp_sendbytes(char* payload, int len) {
-    sendto(sock, payload, len, 0, (struct sockaddr*)&dest_addr,
-           sizeof(dest_addr));
-}
-
-static void udp_sendstr(char* payload) {
-    udp_sendbytes(payload, strlen(payload));
-}
-
-static void udp_sendf(const char* fmt, ...) {
-    char payload[UDP_BUFFER_SIZE];
-
-    va_list args;
-    va_start(args, fmt);
-    int len = vsprintf(payload, fmt, args);
-    va_end(args);
-
-    udp_sendbytes(payload, len);
-}
-
-static void on_usb_detect(uint8_t usbNum, void* dev) {
-    sDevDesc* device = (sDevDesc*)dev;
-
-    udp_sendf("New device detected on USB#%d\n", usbNum);
-    udp_sendf("desc.bcdUSB             = 0x%04x\n", device->bcdUSB);
-    udp_sendf("desc.bDeviceClass       = 0x%02x\n", device->bDeviceClass);
-    udp_sendf("desc.bDeviceSubClass    = 0x%02x\n", device->bDeviceSubClass);
-    udp_sendf("desc.bDeviceProtocol    = 0x%02x\n", device->bDeviceProtocol);
-    udp_sendf("desc.bMaxPacketSize0    = 0x%02x\n", device->bMaxPacketSize0);
-    udp_sendf("desc.idVendor           = 0x%04x\n", device->idVendor);
-    udp_sendf("desc.idProduct          = 0x%04x\n", device->idProduct);
-    udp_sendf("desc.bcdDevice          = 0x%04x\n", device->bcdDevice);
-    udp_sendf("desc.iManufacturer      = 0x%02x\n", device->iManufacturer);
-    udp_sendf("desc.iProduct           = 0x%02x\n", device->iProduct);
-    udp_sendf("desc.iSerialNumber      = 0x%02x\n", device->iSerialNumber);
-    udp_sendf("desc.bNumConfigurations = 0x%02x\n", device->bNumConfigurations);
-
-    // if( device->iProduct == mySupportedIdProduct && device->iManufacturer ==
-    // mySupportedManufacturer ) {
-    //   myListenUSBPort = usbNum;
-    // }
-}
-
-static void on_usb_data(uint8_t usbNum, uint8_t byte_depth, uint8_t* data,
-                        uint8_t data_len) {
-    // if( myListenUSBPort != usbNum ) return;
-
-    udp_sendf("in: ");
-    for (int k = 0; k < data_len; k++) {
-        udp_sendf("0x%02x ", data[k]);
-    }
-    udp_sendf("\n");
-}
-
-void loop() {
+void blink_loop() {
     int64_t cur_millis = esp_timer_get_time() / 1000;
     if (cur_millis - last_blink >= 500) {
         last_blink = cur_millis;
-
-        if (connected) {
-            udp_sendf("ms since boot: %lli\n", cur_millis);
-        }
-
-        if (BLINK) {
-            if (on) {
-                gpio_set_level(LED_BUILTIN, 0);
-            } else {
-                gpio_set_level(LED_BUILTIN, 1);
-            }
+        if (on) {
+            gpio_set_level(LED_BUILTIN, 0);
+        } else {
+            gpio_set_level(LED_BUILTIN, 1);
         }
 
         on = !on;
     }
 }
 
-void loop_task(void* param) {
+void blink_loop_task(void* param) {
     while (true) {
-        loop();
-        fflush(stdout);
+        blink_loop();
+
+        vTaskDelay(pdMS_TO_TICKS(1));
+    }
+}
+
+/**
+ * @brief Perform the check of whatever event source the module uses, and if an event should be published, sets the
+ * `mqtt_event_id` and `mqtt_body` strings appropriately
+ *
+ * @return whether the module should publish an event
+ */
+bool check_sensor() {
+    int64_t cur_millis = esp_timer_get_time() / 1000;
+    if (cur_millis - last_uptime_ping >= 1000) {
+        last_uptime_ping = cur_millis;
+
+        sprintf(mqtt_event_id, "uptime");
+        sprintf(mqtt_body, "%llu", cur_millis);
+
+        return true;
+    }
+
+    return false;
+}
+
+void sensor_loop() {
+    if (check_sensor()) {
+        sprintf(mqtt_topic, "%s/%s", DEVICE_ID, mqtt_event_id);
+        esp_mqtt_client_publish(mqtt_client, mqtt_topic, mqtt_body, 0, MQTT_QOS, 0);
+    }
+}
+
+void sensor_loop_task(void* param) {
+    while (true) {
+        sensor_loop();
 
         vTaskDelay(pdMS_TO_TICKS(1));
     }
@@ -202,8 +180,7 @@ extern "C" void app_main();
 void app_main(void) {
     // Initialize NVS
     esp_err_t ret = nvs_flash_init();
-    if (ret == ESP_ERR_NVS_NO_FREE_PAGES ||
-        ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+    if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
         ESP_ERROR_CHECK(nvs_flash_erase());
         ret = nvs_flash_init();
     }
@@ -220,11 +197,17 @@ void app_main(void) {
         gpio_config(&io_conf);
     }
 
-    // wifi
+    // network
     wifi_init();
-    udp_init();
+    mqtt_init();
 
-    xTaskCreate(loop_task, "loop", 10240, NULL, 1, NULL);
+    // blink loop
+    if (BLINK) {
+        xTaskCreate(blink_loop_task, "blink", 10240, NULL, BLINK_PRIORITY, NULL);
+    }
+
+    // sensor loop
+    xTaskCreate(sensor_loop_task, "sensor", 10240, NULL, SENSOR_PRIORITY, NULL);
 
     vTaskDelay(1);
 }
