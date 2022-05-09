@@ -5,11 +5,9 @@
 #include <string.h>
 #include <sys/param.h>
 
+#include "NimBLEDevice.h"
 #include "driver/gpio.h"
 #include "esp_bt.h"
-#include "esp_bt_device.h"
-#include "esp_bt_main.h"
-#include "esp_gap_bt_api.h"
 #include "esp_hidh.h"
 #include "esp_log.h"
 #include "esp_netif.h"
@@ -47,34 +45,22 @@ esp_mqtt_client_handle_t mqtt_client;
 char mqtt_event_id[MQTT_EVENT_ID_LENGTH];
 
 #define MQTT_TOPIC_LENGTH 256
-char mqtt_topic[MQTT_TOPIC_LENGTH];
-
 #define MQTT_BODY_LENGTH 1024
+
+char mqtt_topic[MQTT_TOPIC_LENGTH];
 char mqtt_body[MQTT_BODY_LENGTH];
 
-typedef enum {
-    APP_GAP_STATE_IDLE = 0,
-    APP_GAP_STATE_DEVICE_DISCOVERING,
-    APP_GAP_STATE_DEVICE_DISCOVER_COMPLETE,
-    APP_GAP_STATE_SERVICE_DISCOVERING,
-    APP_GAP_STATE_SERVICE_DISCOVER_COMPLETE,
-} app_gap_state_t;
+char mqtt_topic_debug[MQTT_TOPIC_LENGTH];
+char mqtt_body_debug[MQTT_BODY_LENGTH];
 
-typedef struct {
-    bool dev_found;
-    uint8_t bdname_len;
-    uint8_t eir_len;
-    uint8_t rssi;
-    uint32_t cod;
-    uint8_t eir[ESP_BT_GAP_EIR_DATA_LEN];
-    uint8_t bdname[ESP_BT_GAP_MAX_BDNAME_LEN + 1];
-    esp_bd_addr_t bda;
-    app_gap_state_t state;
-} app_gap_cb_t;
+BLEScan* pBLEScan;
+static BLEUUID serviceUUID(PIANO_UUID);
 
-static app_gap_cb_t m_dev_info;
-
-#define GAP_TAG "GAP"
+static bool do_connect_ble = false;
+static bool connected_ble = false;
+static bool do_scan = true;
+static BLERemoteCharacteristic* pRemoteCharacteristic;
+static BLEAdvertisedDevice* piano_device;
 
 unsigned long last_uptime_ping = 0;
 
@@ -151,233 +137,160 @@ void mqtt_send_debug(const char* fmt, ...) {
     va_list aptr;
 
     va_start(aptr, fmt);
-    vsprintf(mqtt_body, fmt, aptr);
+    vsnprintf(mqtt_body_debug, MQTT_BODY_LENGTH, fmt, aptr);
     va_end(aptr);
 
-    sprintf(mqtt_topic, "%s/debug", DEVICE_ID);
-    esp_mqtt_client_publish(mqtt_client, mqtt_topic, mqtt_body, 0, MQTT_QOS, 0);
+    snprintf(mqtt_topic_debug, MQTT_TOPIC_LENGTH, "%s/debug", DEVICE_ID);
+    esp_mqtt_client_publish(mqtt_client, mqtt_topic_debug, mqtt_body_debug, 0, MQTT_QOS, 0);
 }
 
-static char* bda2str(esp_bd_addr_t bda, char* str, size_t size) {
-    if (bda == NULL || str == NULL || size < 18) {
-        return NULL;
+class BluetoothCallbacks : public BLEClientCallbacks {
+    void onConnect(BLEClient* pclient) {
+        connected_ble = true;
+        do_scan = false;
+        mqtt_send_debug("connected!");
     }
 
-    uint8_t* p = bda;
-    sprintf(str, "%02x:%02x:%02x:%02x:%02x:%02x", p[0], p[1], p[2], p[3], p[4], p[5]);
-    return str;
-}
-
-static char* uuid2str(esp_bt_uuid_t* uuid, char* str, size_t size) {
-    if (uuid == NULL || str == NULL) {
-        return NULL;
+    void onDisconnect(BLEClient* pclient) {
+        connected_ble = false;
+        do_scan = true;
+        mqtt_send_debug("disconnected :/");
     }
 
-    if (uuid->len == 2 && size >= 5) {
-        sprintf(str, "%04x", uuid->uuid.uuid16);
-    } else if (uuid->len == 4 && size >= 9) {
-        sprintf(str, "%08x", uuid->uuid.uuid32);
-    } else if (uuid->len == 16 && size >= 37) {
-        uint8_t* p = uuid->uuid.uuid128;
-        sprintf(str, "%02x%02x%02x%02x-%02x%02x-%02x%02x-%02x%02x-%02x%02x%02x%02x%02x%02x", p[15], p[14], p[13], p[12],
-                p[11], p[10], p[9], p[8], p[7], p[6], p[5], p[4], p[3], p[2], p[1], p[0]);
-    } else {
-        return NULL;
+    /***************** New - Security handled here ********************
+    ****** Note: these are the same return values as defaults ********/
+    uint32_t onPassKeyRequest() {
+        mqtt_send_debug("requested passkey");
+        return 0;
     }
 
-    return str;
-}
-
-static bool get_name_from_eir(uint8_t* eir, uint8_t* bdname, uint8_t* bdname_len) {
-    uint8_t* rmt_bdname = NULL;
-    uint8_t rmt_bdname_len = 0;
-
-    if (!eir) {
-        return false;
-    }
-
-    rmt_bdname = esp_bt_gap_resolve_eir_data(eir, ESP_BT_EIR_TYPE_CMPL_LOCAL_NAME, &rmt_bdname_len);
-    if (!rmt_bdname) {
-        rmt_bdname = esp_bt_gap_resolve_eir_data(eir, ESP_BT_EIR_TYPE_SHORT_LOCAL_NAME, &rmt_bdname_len);
-    }
-
-    if (rmt_bdname) {
-        if (rmt_bdname_len > ESP_BT_GAP_MAX_BDNAME_LEN) {
-            rmt_bdname_len = ESP_BT_GAP_MAX_BDNAME_LEN;
-        }
-
-        if (bdname) {
-            memcpy(bdname, rmt_bdname, rmt_bdname_len);
-            bdname[rmt_bdname_len] = '\0';
-        }
-        if (bdname_len) {
-            *bdname_len = rmt_bdname_len;
-        }
+    bool onConfirmPIN(uint32_t pass_key) {
+        mqtt_send_debug("The passkey YES/NO number: %d\n", pass_key);
         return true;
     }
 
-    return false;
+    void onAuthenticationComplete(ble_gap_conn_desc desc) { mqtt_send_debug("holy shit it worked"); }
+    /*******************************************************************/
+};
+
+class BluetoothAdvertisedDeviceCallbacks : public BLEAdvertisedDeviceCallbacks {
+    void onResult(BLEAdvertisedDevice* advertisedDevice) {
+        // mqtt_send_debug("found device: %s\n", advertisedDevice->toString().c_str());
+
+        if (advertisedDevice->haveServiceUUID() && advertisedDevice->isAdvertisingService(serviceUUID)) {
+            mqtt_send_debug("device is piano!");
+            BLEDevice::getScan()->stop();
+            piano_device = advertisedDevice;
+            do_connect_ble = true;
+            do_scan = false;
+        }
+    }
+};
+
+static void notifyCallback(BLERemoteCharacteristic* pBLERemoteCharacteristic, uint8_t* pData, size_t length,
+                           bool isNotify) {
+    printf("Notify callback for characteristic %s of data length %d data: %s\n",
+           pBLERemoteCharacteristic->getUUID().toString().c_str(), length, (char*)pData);
 }
 
-static void update_device_info(esp_bt_gap_cb_param_t* param) {
-    char bda_str[18];
-    uint32_t cod = 0;
-    int32_t rssi = -129; /* invalid value */
-    esp_bt_gap_dev_prop_t* p;
+bool connectToServer() {
+    mqtt_send_debug("Forming a connection to %s\n", piano_device->getAddress().toString().c_str());
 
-    mqtt_send_debug("Device found: %s", bda2str(param->disc_res.bda, bda_str, 18));
-    for (int i = 0; i < param->disc_res.num_prop; i++) {
-        p = param->disc_res.prop + i;
-        switch (p->type) {
-            case ESP_BT_GAP_DEV_PROP_COD:
-                cod = *(uint32_t*)(p->val);
-                mqtt_send_debug("--Class of Device: 0x%x", cod);
-                break;
-            case ESP_BT_GAP_DEV_PROP_RSSI:
-                rssi = *(int8_t*)(p->val);
-                mqtt_send_debug("--RSSI: %d", rssi);
-                break;
-            case ESP_BT_GAP_DEV_PROP_BDNAME:
-            default:
-                break;
-        }
+    BLEClient* pClient = BLEDevice::createClient();
+    mqtt_send_debug(" - Created client\n");
+
+    pClient->setClientCallbacks(new BluetoothCallbacks());
+
+    // Connect to the remove BLE Server.
+    pClient->connect(piano_device);  // if you pass BLEAdvertisedDevice instead of address, it will be recognized type
+                                     // of peer device address (public or private)
+    mqtt_send_debug(" - Connected to server\n");
+
+    int num_services = piano_device->getServiceDataCount();
+    mqtt_send_debug("number of service UUIDs: %d", num_services);
+    for (int i = 0; i < num_services; i++) {
+        mqtt_send_debug("%s", piano_device->getServiceDataUUID(i).toString().c_str());
     }
 
-    /* search for device with MAJOR service class as "rendering" in COD */
-    app_gap_cb_t* p_dev = &m_dev_info;
-    if (p_dev->dev_found && 0 != memcmp(param->disc_res.bda, p_dev->bda, ESP_BD_ADDR_LEN)) {
-        return;
+    // Obtain a reference to the service we are after in the remote BLE server.
+    BLERemoteService* pRemoteService = pClient->getService(piano_device->getServiceUUID(0));
+    if (pRemoteService == nullptr) {
+        mqtt_send_debug("Failed to find our service UUID: %s\n", serviceUUID.toString().c_str());
+        pClient->disconnect();
+        return false;
     }
+    mqtt_send_debug(" - Found our service\n");
 
-    if (!esp_bt_gap_is_valid_cod(cod) || (!(esp_bt_gap_get_cod_major_dev(cod) == ESP_BT_COD_MAJOR_DEV_PHONE) &&
-                                          !(esp_bt_gap_get_cod_major_dev(cod) == ESP_BT_COD_MAJOR_DEV_AV))) {
-        return;
+    /* // Obtain a reference to the characteristic in the service of the remote BLE server.
+    pRemoteCharacteristic = pRemoteService->getCharacteristic(charUUID);
+    if (pRemoteCharacteristic == nullptr) {
+        printf("Failed to find our characteristic UUID: %s\n", charUUID.toString().c_str());
+        pClient->disconnect();
+        return false;
     }
+    mqtt_send_debug(" - Found our characteristic\n"); */
 
-    memcpy(p_dev->bda, param->disc_res.bda, ESP_BD_ADDR_LEN);
-    p_dev->dev_found = true;
-    for (int i = 0; i < param->disc_res.num_prop; i++) {
-        p = param->disc_res.prop + i;
-        switch (p->type) {
-            case ESP_BT_GAP_DEV_PROP_COD:
-                p_dev->cod = *(uint32_t*)(p->val);
-                break;
-            case ESP_BT_GAP_DEV_PROP_RSSI:
-                p_dev->rssi = *(int8_t*)(p->val);
-                break;
-            case ESP_BT_GAP_DEV_PROP_BDNAME: {
-                uint8_t len = (p->len > ESP_BT_GAP_MAX_BDNAME_LEN) ? ESP_BT_GAP_MAX_BDNAME_LEN : (uint8_t)p->len;
-                memcpy(p_dev->bdname, (uint8_t*)(p->val), len);
-                p_dev->bdname[len] = '\0';
-                p_dev->bdname_len = len;
-                break;
-            }
-            case ESP_BT_GAP_DEV_PROP_EIR: {
-                memcpy(p_dev->eir, (uint8_t*)(p->val), p->len);
-                p_dev->eir_len = p->len;
-                break;
-            }
-            default:
-                break;
-        }
-    }
+    /* // Read the value of the characteristic.
+    if (pRemoteCharacteristic->canRead()) {
+        std::string value = pRemoteCharacteristic->readValue();
+        mqtt_send_debug("The characteristic value was: %s\n", value.c_str());
+    } */
+    /** registerForNotify() has been deprecated and replaced with subscribe() / unsubscribe().
+     *  Subscribe parameter defaults are: notifications=true, notifyCallback=nullptr, response=false.
+     *  Unsubscribe parameter defaults are: response=false.
+     */
+    /* if (pRemoteCharacteristic->canNotify()) {
+        // pRemoteCharacteristic->registerForNotify(notifyCallback);
+        pRemoteCharacteristic->subscribe(true, notifyCallback);
+    } */
 
-    if (p_dev->eir && p_dev->bdname_len == 0) {
-        get_name_from_eir(p_dev->eir, p_dev->bdname, &p_dev->bdname_len);
-        mqtt_send_debug("Found a target device, address %s, name %s", bda_str, p_dev->bdname);
-        p_dev->state = APP_GAP_STATE_DEVICE_DISCOVER_COMPLETE;
-        mqtt_send_debug("Cancel device discovery ...");
-        esp_bt_gap_cancel_discovery();
-    }
+    return true;
 }
 
-void bt_app_gap_cb(esp_bt_gap_cb_event_t event, esp_bt_gap_cb_param_t* param) {
-    app_gap_cb_t* p_dev = &m_dev_info;
-    char bda_str[18];
-    char uuid_str[37];
+void connectTask(void* parameter) {
+    while (true) {
+        // If the flag "do_connect_ble" is true then we have scanned for and found the desired
+        // BLE Server with which we wish to connect.  Now we connect to it.  Once we are
+        // connected we set the connected flag to be true.
+        if (do_connect_ble) {
+            if (connectToServer()) {
+                mqtt_send_debug("We are now connected to the BLE Server.\n");
+            } else {
+                mqtt_send_debug("We have failed to connect to the server; there is nothin more we will do.\n");
+            }
+            do_connect_ble = false;
+        }
 
-    switch (event) {
-        case ESP_BT_GAP_DISC_RES_EVT: {
-            update_device_info(param);
-            break;
+        // If we are connected to a peer BLE Server, update the characteristic each time we are reached
+        // with the current time since boot.
+        if (connected_ble) {
+            char buf[256];
+            snprintf(buf, 256, "Time since boot: %lu", (unsigned long)(esp_timer_get_time() / 1000000ULL));
+
+            // Set the characteristic's value to be the array of bytes that is actually a string.
+            /*** Note: write value now returns true if successful, false otherwise - try again or disconnect ***/
+            pRemoteCharacteristic->writeValue((uint8_t*)buf, strlen(buf), false);
+        } else if (do_scan) {
+            mqtt_send_debug("scanning...");
+            pBLEScan->start(1);  // this is just eample to start scan after disconnect, most likely there is
+                                 //  better way to do it in arduino
         }
-        case ESP_BT_GAP_DISC_STATE_CHANGED_EVT: {
-            if (param->disc_st_chg.state == ESP_BT_GAP_DISCOVERY_STOPPED) {
-                mqtt_send_debug("Device discovery stopped.");
-                mqtt_send_debug("p_dev->dev_found: %d", p_dev->dev_found);
-                if ((p_dev->state == APP_GAP_STATE_DEVICE_DISCOVER_COMPLETE ||
-                     p_dev->state == APP_GAP_STATE_DEVICE_DISCOVERING) &&
-                    p_dev->dev_found) {
-                    p_dev->state = APP_GAP_STATE_SERVICE_DISCOVERING;
-                    mqtt_send_debug("Discover services ...");
-                    esp_bt_gap_get_remote_services(p_dev->bda);
-                }
-            } else if (param->disc_st_chg.state == ESP_BT_GAP_DISCOVERY_STARTED) {
-                mqtt_send_debug("Discovery started.");
-            }
-            break;
-        }
-        case ESP_BT_GAP_RMT_SRVCS_EVT: {
-            if (memcmp(param->rmt_srvcs.bda, p_dev->bda, ESP_BD_ADDR_LEN) == 0 &&
-                p_dev->state == APP_GAP_STATE_SERVICE_DISCOVERING) {
-                p_dev->state = APP_GAP_STATE_SERVICE_DISCOVER_COMPLETE;
-                if (param->rmt_srvcs.stat == ESP_BT_STATUS_SUCCESS) {
-                    mqtt_send_debug("Services for device %s found", bda2str(p_dev->bda, bda_str, 18));
-                    for (int i = 0; i < param->rmt_srvcs.num_uuids; i++) {
-                        esp_bt_uuid_t* u = param->rmt_srvcs.uuid_list + i;
-                        mqtt_send_debug("--%s", uuid2str(u, uuid_str, 37));
-                        // ESP_LOGI(GAP_TAG, "--%d", u->len);
-                    }
-                } else {
-                    mqtt_send_debug("Services for device %s not found", bda2str(p_dev->bda, bda_str, 18));
-                }
-            }
-            break;
-        }
-        case ESP_BT_GAP_RMT_SRVC_REC_EVT:
-        default: {
-            mqtt_send_debug("event: %d", event);
-            break;
-        }
+
+        vTaskDelay(2000 / portTICK_PERIOD_MS);  // Delay a second between loops.
     }
+
+    vTaskDelete(NULL);
 }
 
 static void bt_init() {
-    ESP_ERROR_CHECK(esp_bt_controller_mem_release(ESP_BT_MODE_BLE));
-
-    esp_bt_controller_config_t bt_cfg = BT_CONTROLLER_INIT_CONFIG_DEFAULT();
-    bt_cfg.mode = ESP_BT_MODE_CLASSIC_BT;
-
-    esp_err_t ret;
-    if ((ret = esp_bt_controller_init(&bt_cfg)) != ESP_OK) {
-        mqtt_send_debug("esp_bt_controller_init failed: %s", esp_err_to_name(ret));
-    }
-    if ((ret = esp_bt_controller_enable(ESP_BT_MODE_CLASSIC_BT)) != ESP_OK) {
-        mqtt_send_debug("esp_bt_controller_enable failed: %s", esp_err_to_name(ret));
-    }
-    if ((ret = esp_bluedroid_init()) != ESP_OK) {
-        mqtt_send_debug("esp_bluedroid_init failed: %s", esp_err_to_name(ret));
-    }
-    if ((ret = esp_bluedroid_enable()) != ESP_OK) {
-        mqtt_send_debug("esp_bluedroid_enable failed: %s", esp_err_to_name(ret));
-    }
-
-    const char* dev_name = "ESP_GAP_INQRUIY";
-    esp_bt_dev_set_device_name(dev_name);
-
-    /* set discoverable and connectable mode, wait to be connected */
-    esp_bt_gap_set_scan_mode(ESP_BT_CONNECTABLE, ESP_BT_GENERAL_DISCOVERABLE);
-
-    /* register GAP callback function */
-    esp_bt_gap_register_callback(bt_app_gap_cb);
-
-    /* inititialize device information and status */
-    app_gap_cb_t* p_dev = &m_dev_info;
-    memset(p_dev, 0, sizeof(app_gap_cb_t));
-
-    /* start to discover nearby Bluetooth devices */
-    p_dev->state = APP_GAP_STATE_DEVICE_DISCOVERING;
-    esp_bt_gap_start_discovery(ESP_BT_INQ_MODE_GENERAL_INQUIRY, 10, 0);
+    mqtt_send_debug("initializing bluetooth");
+    BLEDevice::init("");
+    pBLEScan = BLEDevice::getScan();
+    pBLEScan->setAdvertisedDeviceCallbacks(new BluetoothAdvertisedDeviceCallbacks());
+    pBLEScan->setActiveScan(true);
+    pBLEScan->setInterval(100);
+    pBLEScan->setWindow(80);
+    xTaskCreate(connectTask, "bluetooth", 10240, NULL, 2, NULL);
 }
 
 void blink_loop() {
@@ -425,7 +338,7 @@ bool check_sensor() {
 void sensor_loop() {
     if (check_sensor()) {
         sprintf(mqtt_topic, "%s/%s", DEVICE_ID, mqtt_event_id);
-        esp_mqtt_client_publish(mqtt_client, mqtt_topic, mqtt_body, 0, MQTT_QOS, 0);
+        // esp_mqtt_client_publish(mqtt_client, mqtt_topic, mqtt_body, 0, MQTT_QOS, 0);
     }
 }
 

@@ -15,4 +15,7 @@ config.h:
 
 // the ID of the device that this code will be uploaded to
 #define DEVICE_ID ""
+
+// any other constants that are best not shared with the public
+// example: BLE service UUID
 ```
